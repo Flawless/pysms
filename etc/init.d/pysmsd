@@ -1,0 +1,14 @@
+#!/sbin/runscript
+PIDFILE=/var/run/pysmsd.pid
+BINARY=/usr/bin/pysmsd
+start() {
+    ebegin "Starting pysmsd"
+    start-stop-daemon --start --quiet --pidfile $PIDFILE --exec $BINARY 
+    eend $?
+}
+
+stop() {
+    ebegin "Stopping pysmsd"
+    start-stop-daemon --stop --exec $BINARY --pidfile $PIDFILE --quiet
+    eend $?
+}
