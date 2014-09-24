@@ -7,33 +7,51 @@ import threading
 import logging
 import sys
 import datetime
+import signal
+import ast
 # SETTINGS
-tcp_serv_addr=('localhost', 9999)
+tcp_serv_addr=('localhost', 25111)
 #SER_PORT='/dev/ttyACM0'
 #BAUDRATE='19200'
+shutdown_flag=False
 msg_ok='OK\r\n'
 period=60
 timeout=30
 # INIT
-logging.basicConfig(format = u'%(levelname)-8s [%(asctime)s] %(message)s', level = logging.DEBUG, filename = u'/var/log/pysms.log')
+logging.basicConfig(format = u'%(levelname)-8s [%(asctime)s] %(message)s', level = logging.DEBUG, filename = '/var/log/pysms.log')
 state='idle'
 #ser=serial.Serial(SER_PORT, BAUDRATE, timeout=5)
 timestamp=time.time()
-queue=queue.Queue()
+sms_queue=queue.Queue()
 tcp_serv_thread=threading.Thread()
 NUMBER_THREADS=1
+def myexcepthook(exctype, value, traceback):
+    if exctype == KeyboardInterrupt:
+        logging.info('Terminated by user')
+        global shutdown_flag
+        shutdown_flag=True
+    else:
+        sys.__excepthook__(exctype, value, traceback)
+sys.excepthook = myexcepthook
+def signal_term_handler(signal, frame):
+    global shutdown_flag
+    logging.info('recieved sigterm')
+    shutdown_flag=True
+signal.signal(signal.SIGTERM, signal_term_handler)
+
 class SMS():
     def __init__(self, *args, **kwargs):
         if 'recipient' in kwargs and 'content' in kwargs:
             self.recipient=kwargs.get('recipient')
             self.content=kwargs.get('content').encode('utf-8')
         else:
-            raise Exception
-    def __init__(self, recipient, content):
-        self.recipient=recipient
-        self.content=content.encode('utf-8')
+            self.recipient=args[0][:12]
+            self.content=args[0][12:]
+        logging.debug('message constructed: %s'%self)
     def __repr__(self):
         return '%s %s'%(self.recipient.decode('utf-8'),self.content.decode('utf-8'))
+    def __str__(self):
+        return 'recipient: %s\n content: %s'%(self.recipient.decode('utf-8'),self.content.decode('utf-8'))    
     def send(self):
         if not send_command('AT+CMGS="' + self.recipient + '"\r', '>'):
             return False
@@ -58,31 +76,32 @@ sms_error_counter=error_counter(5,reinit)
 class MyTCPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         self.data = self.request.recv(1024).strip()
-        logger.debug(self.data)
+        logging.debug('bytes recieved: %s'%self.data)
+        sms=SMS(self.data)
 class SmsSender(threading.Thread):
     def __init__(self):
         super(SmsSender,self).__init__()
         self.setDaemon(True)
-        self.queue=queue
+        self.sms_queue=sms_queue
     def run(self):
         while True:
             try:
                 start=datetime.datetime.now().strftime('%H:%M:%S')
-                sms=self.queue.get(block=False)
+                sms=self.sms_queue.get(block=False)
                 if sms.send():
-                    logging.info('%s %s %s'% (u'Message',sms,u'sended.'))
+                    logging.info('%s %s %s'% ('Message',sms,'sended.'))
                 else:
-                    logging.warning('%s %s %s'% (u'Message',sms,u'not sended. Service will try to resend it again later.'))
+                    logging.warning('%s %s %s'% ('Message',sms,'not sended. Service will try to resend it again later.'))
                     raise Exception('Message not sended')
-                self.queue.task_done()
+                self.sms_queue.task_done()
             except queue.Empty:
-                logger.error('%s get Queue.EMPTY exception\r\n'%self.getName())
+                logging.error('%s get Queue.EMPTY exception\r\n'%self.getName())
                 break
             except Exception as e:
-                logger.error('%s get %s exception\r\n'%(self.getName(),e))
-                self.queue.task_done()
+                logging.error('%s get %s exception\r\n'%(self.getName(),e))
+                self.sms_queue.task_done()
                 sms_error_counter.increase()
-                self.queue.put(sms)
+                self.sms_queue.put(sms)
 def send_command(command_str, answer=msg_ok, timeout=timeout):
     global ser
     ser.flushInput()
@@ -117,8 +136,9 @@ def idle():
     global tcp_serv_thread
     logging.info('TCP server')
     tcp_serv=socketserver.TCPServer(tcp_serv_addr, MyTCPHandler)
+    tcp_serv.allow_reuse_address=True
     tcp_serv_thread=threading.Thread(target=tcp_serv.serve_forever)
-    # try:
+    tcp_serv_thread.daemon=True
     tcp_serv_thread.start()
     logging.info('OK')
     #except:
@@ -151,17 +171,17 @@ def idle():
     #     return
     state='wait'
 def wait():
-    print('Ready to serve!')
+    logging.debug('Ready to serve!')
     threads=[]
     for i in range(NUMBER_THREADS):
         threads.append(SmsSender())
         threads[-1].start()
-    queue.join()
+    sms_queue.join()
     time.sleep(period)
 options={
     'idle':idle,
     'wait':wait,
 }
 #-STATES
-while True:
+while not shutdown_flag:
     options[state]()
