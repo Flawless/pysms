@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-#import serial
+import serial
 import time
 import socketserver
 import queue
@@ -9,36 +9,110 @@ import sys
 import datetime
 import signal
 import ast
+import traceback
 # SETTINGS
 tcp_serv_addr=('localhost', 25111)
-#SER_PORT='/dev/ttyACM0'
-#BAUDRATE='19200'
-shutdown_flag=False
+serial_ports=(('/dev/ttyACM0','19200'),('/dev/ttyACM1','19200'))
 msg_ok='OK\r\n'
 period=60
-timeout=30
+timeout=10
 # INIT
-logging.basicConfig(format = u'%(levelname)-8s [%(asctime)s] %(message)s', level = logging.DEBUG, filename = '/var/log/pysms.log')
+logging.basicConfig(format = '%(levelname)-8s %(process)s %(thread)s: [%(asctime)s] %(message)s', level = logging.DEBUG, filename = '/var/log/pysms.log')
 state='idle'
-#ser=serial.Serial(SER_PORT, BAUDRATE, timeout=5)
 timestamp=time.time()
 sms_queue=queue.Queue()
 tcp_serv_thread=threading.Thread()
-NUMBER_THREADS=1
+devices=[]
+def manage_devices():
+    for dev in devices:
+        if dev.status=='crashed' or dev.status=='running' and time.time()-dev.timestamp<300:
+            if not dev.sms==None:
+                sms_queue.put(dev.sms)
+                dev.sms=None
+            thread.Thread(target=dev.initiate()).start()
+            dev.set_status('running')
+        elif dev.status=='sleep' and not sms_queue.empty():
+            sms=sms_queue.get(block=False)
+            thread.Thread(dev.send_sms(sms)).start()
+            dev.set_status('running')
+            break
 def myexcepthook(exctype, value, traceback):
     if exctype == KeyboardInterrupt:
         logging.info('Terminated by user')
-        global shutdown_flag
-        shutdown_flag=True
+        global state
+        state='shutdown'
     else:
         sys.__excepthook__(exctype, value, traceback)
 sys.excepthook = myexcepthook
 def signal_term_handler(signal, frame):
-    global shutdown_flag
+    global state
     logging.info('recieved sigterm')
-    shutdown_flag=True
+    state='shutdown'
 signal.signal(signal.SIGTERM, signal_term_handler)
-
+class Device():
+    def __init__(self, serial_port, status='crashed'):
+        self.serial_port = serial_port
+        self.staus  = status
+        self.thread = ''
+        self.sms    = None
+    def set_sms(self, sms):
+        self.sms=sms
+    def set_status(self, status):
+        self.timestamp=detetime.datetime.now()
+        self.status=status
+    def initiate(self):
+        try:
+            logging.info('serial..')
+            if not self.serial_port.isOpen():
+                self.serial_port=self.serial_port.open()
+                if self.serial_port.isOpen(): 
+                    logging.info('OK')
+                else:
+                    raise Exception('Serial down')
+            else:
+                logging.info('OK')
+            logging.info('power..')
+            if not check_power_on(self.serial_port):
+                power_on(self.serial_port)
+                if check_power_on(self.serial_port):
+                    logging.info('OK')
+                else:
+                    raise Exception('Device down')
+            else:
+                logging.info('OK')
+            logging.info('initial setiings..')
+            if load_initial_settings(self.serial_port):
+                logging.info('OK')
+            else:
+                raise Exception('Init settings failed')
+        except Exception as e:
+            for frame in traceback.extract_tb(sys.exc_info()[2]):
+                fname,lineno,fn,text = frame
+                print("Error in %s on line %d" % (fname, lineno))
+            logging.error('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
+            self.status='crashed'
+        self.status='sleep'
+    def send_sms(self):
+        try:
+            if not send_command(self.serial_port,'AT+CMGS="' + self.job.recipient + '"\r', '>'):
+                raise Exception('message was not sended')
+            if not send_command(self.serial_port,self.job.content + b'\r', '>'):
+                raise Exception('message was not sended')
+            if not send_command(self.serial_port,bytes([26])):
+                raise Exception('message was not sended')
+        except Exception as e:
+            for frame in traceback.extract_tb(sys.exc_info()[2]):
+                fname,lineno,fn,text = frame
+                print("Error in %s on line %d" % (fname, lineno))
+            logging.error('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
+            self.status='crashed'
+        self.status='sleep'
+    def read_sms(self):
+        try:
+            logging.debug('sms reader dummy')        
+        except Exception as e:
+            logging.error('Get exception %s'%(self.getName(),e))
+            self.status='crashed'
 class SMS():
     def __init__(self, *args, **kwargs):
         if 'recipient' in kwargs and 'content' in kwargs:
@@ -52,88 +126,52 @@ class SMS():
         return '%s %s'%(self.recipient.decode('utf-8'),self.content.decode('utf-8'))
     def __str__(self):
         return 'recipient: %s\n content: %s'%(self.recipient.decode('utf-8'),self.content.decode('utf-8'))    
-    def send(self):
-        if not send_command('AT+CMGS="' + self.recipient + '"\r', '>'):
-            return False
-        if not send_command(self.content + b'\r', '>'):
-            return False
-        return send_command(bytes([26]))
-def tcp_data_parse(data):
-    parsed_data=data
-    return parsed_data
-def reinit():
-    state='idle'
-class error_counter():
-    def __init__(self, maximum, reset):
-        self.count=0
-        self.maximum=maximum
-    def increase(self, step=1):
-        self.count+=step
-        if self.count>=self.maximum:
-            self.reset()
-            self.count=0
-sms_error_counter=error_counter(5,reinit)
 class MyTCPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         self.data = self.request.recv(1024).strip()
         logging.debug('bytes recieved: %s'%self.data)
         sms=SMS(self.data)
-class SmsSender(threading.Thread):
-    def __init__(self):
-        super(SmsSender,self).__init__()
-        self.setDaemon(True)
-        self.sms_queue=sms_queue
-    def run(self):
-        while True:
-            try:
-                start=datetime.datetime.now().strftime('%H:%M:%S')
-                sms=self.sms_queue.get(block=False)
-                if sms.send():
-                    logging.info('%s %s %s'% ('Message',sms,'sended.'))
-                else:
-                    logging.warning('%s %s %s'% ('Message',sms,'not sended. Service will try to resend it again later.'))
-                    raise Exception('Message not sended')
-                self.sms_queue.task_done()
-            except queue.Empty:
-                logging.error('%s get Queue.EMPTY exception\r\n'%self.getName())
-                break
-            except Exception as e:
-                logging.error('%s get %s exception\r\n'%(self.getName(),e))
-                self.sms_queue.task_done()
-                sms_error_counter.increase()
-                self.sms_queue.put(sms)
-def send_command(command_str, answer=msg_ok, timeout=timeout):
-    global ser
-    ser.flushInput()
-    ser.write(command_str.encode())
-    return wait_for(answer, timeout)
-def wait_for(template, timeout=timeout):
-    global ser
+        global sms_queue
+        sms_queue.put(sms)
+def send_command(serial_port, command_str, answer=msg_ok, timeout=timeout):
+    serial_port.flushInput()
+    serial_port.write(command_str.encode())
+    return wait_for(serial_port, answer, timeout)
+def wait_for(serial_port, template, timeout=timeout):
     template=template.encode()
-    answer = (b'')
+    answer=(b'')
     timestamp=time.time()
     while time.time()-timestamp<timeout and not template in answer:
-        answer+=ser.read(ser.inWaiting())
+        answer+=serial_port.read(serial_port.inWaiting())
         time.sleep(0.1)
-    print(answer)
+    logging.debug('Recieved from: *** %s ***: %s'%(serial_port.port,answer))
     return template in answer
-def check_power_on():
-    return send_command('AT\r')
-def power_on():
-    ser.write(b'+++')
-def load_initial_settings():
-    if not send_command('ATZ\r'):
+def check_power_on(serial_port):
+    return send_command(serial_port,'AT\r')
+def power_on(serial_port):
+    serial_port.write(b'+++')
+def load_initial_settings(serial_port):
+    if not send_command(serial_port, 'ATZ\r'):
         return False 
-    if not send_command('AT+CSMP=17,167,0,0\r'):
+    if not send_command(serial_port, 'AT+CSMP=17,167,0,0\r'):
         return False
-    return send_command('AT+CMGF=1\r')
+    return send_command(serial_port, 'AT+CMGF=1\r')
 # STATE MACHINE
 # +STATES
 def idle():
-    print('initialization..')
-    global ser
+    logging.info('initialization..')
     global state
     global tcp_serv_thread
+    global devices
+    for serial_info in serial_ports:
+        port=serial_info[0]
+        br=serial_info[1]
+        serial_port=serial.Serial(port, br)
+        dev=Device(serial_port)
+        devices.append(dev)
+        logging.debug('starting init thread')
+        thread=threading.Thread(target=dev.initiate())
+        thread.start()        
     logging.info('TCP server')
     tcp_serv=socketserver.TCPServer(tcp_serv_addr, MyTCPHandler)
     tcp_serv.allow_reuse_address=True
@@ -141,47 +179,24 @@ def idle():
     tcp_serv_thread.daemon=True
     tcp_serv_thread.start()
     logging.info('OK')
-    #except:
-    #    logging.error(sys.exc_info()[0])
-    # print('serial..')
-    # if not ser.isOpen():
-    #     ser=ser.open()
-    #     if ser.isOpen(): 
-    #         print('OK')
-    #     else:
-    #         print('FAIL')
-    #         return
-    # else:
-    #     print('OK')
-    # print('power..')
-    # if not check_power_on():
-    #     power_on()
-    #     if check_power_on():
-    #         print('OK')
-    #     else:
-    #         print('FAIL')
-    #         return
-    # else:
-    #     print('OK')
-    # print('initial setiings..')
-    # if load_initial_settings():
-    #     print('OK')
-    # else:
-    #     print('FAIL')
-    #     return
     state='wait'
-def wait():
-    logging.debug('Ready to serve!')
-    threads=[]
-    for i in range(NUMBER_THREADS):
-        threads.append(SmsSender())
-        threads[-1].start()
-    sms_queue.join()
-    time.sleep(period)
+    while not state=='shutdown':
+        logging.debug('ready to serve')
+        manage_devices()
+        time.sleep(period)
+def shutdown():
+    logging.info('shutting down')
+    exit()
 options={
     'idle':idle,
-    'wait':wait,
+#    'wait':wait,
+    'shutdown':shutdown,
 }
 #-STATES
-while not shutdown_flag:
+def main():
+    logging.debug('Current state is: %s'%state)
     options[state]()
+if __name__ == "__main__":
+    main()
+
+
