@@ -1,108 +1,219 @@
 #!/usr/bin/env python
 import serial
 import time
-import mailbox
-import email
+import socketserver
+import queue
+import threading
+import logging
+import sys
+import datetime
+import signal
+import ast
+import traceback
+import random
 # SETTINGS
-PORT='/dev/ttyACM0'
-BAUDRATE='19200'
-msg_ok='OK\r\n'
-mbox=mailbox.Maildir('/var/mail/smssrv')
-period=60
+tcp_serv_addr=('localhost', 25111)
+serial_ports=[('/dev/ttyACM0','19200')]#, ('/dev/ttyACM1','19200'), ('/dev/ttyACM2','19200')]
+msg_ok=b'OK\r\n'
+period=5
 timeout=30
 # INIT
+logging.basicConfig(format = '%(levelname)-8s %(process)s %(thread)s: [%(asctime)s] %(message)s', level = logging.DEBUG, filename = '/var/log/pysms.log')
 state='idle'
-ser=serial.Serial(PORT, BAUDRATE, timeout=5)
 timestamp=time.time()
-def send_command(command_str, answer=msg_ok, timeout=timeout):
-    global ser
-    ser.flushInput() # очистим буфер
-    ser.write(command_str.encode())
-    return wait_for(answer, timeout)
-def wait_for(template, timeout=timeout):
-    global ser
-    template=template.encode()
-    answer = (b'')
+sms_queue=queue.Queue()
+tcp_serv_thread=threading.Thread()
+devices=[]
+def manage_devices():
+    for dev in devices:
+        if dev.status=='crashed' or dev.status=='running' and time.time()-dev.timestamp>300:
+            logging.debug('%s from %s'%(dev.status,time.time()-dev.timestamp))
+            logging.info('Trying to re-initiate device %s'%dev)
+            if not dev.sms==None:
+                sms_queue.put(dev.sms)
+                dev.sms=None
+            thread=threading.Thread(target=dev.initiate)
+            thread.start()
+            dev.set_status('running')
+        elif dev.status=='sleep' and not sms_queue.empty():
+            logging.debug('sending sms')
+            sms=sms_queue.get(block=False)
+            dev.set_sms(sms)
+            logging.debug('sending sms: %s'%sms)
+            thread=threading.Thread(target=dev.send_sms)
+            thread.start()
+            dev.set_status('running')
+            break
+def myexcepthook(exctype, value, traceback):
+    if exctype == KeyboardInterrupt:
+        logging.info('Terminated by user')
+        global state
+        state='shutdown'
+    else:
+        sys.__excepthook__(exctype, value, traceback)
+sys.excepthook = myexcepthook
+def signal_term_handler(signal, frame):
+    global state
+    logging.info('recieved sigterm')
+    state='shutdown'
+signal.signal(signal.SIGTERM, signal_term_handler)
+class Device():
+    def __init__(self, serial_port, status='crashed'):
+        self.serial_port = serial_port
+        self.status  = status
+        self.thread = ''
+        self.sms    = None
+    def __repr__(self):
+        return self.serial_port.port
+    def set_sms(self, sms):
+        self.sms=sms
+    def set_status(self, status):
+        self.timestamp=time.time()
+        self.status=status
+    def initiate(self):
+        try:
+            logging.info('serial..')
+            if not self.serial_port.isOpen():
+                self.serial_port=self.serial_port.open()
+                if self.serial_port.isOpen(): 
+                    logging.info('OK')
+                else:
+                    raise Exception('Serial down')
+            else:
+                logging.info('OK')
+            logging.info('power..')
+            if not check_power_on(self.serial_port):
+                power_on(self.serial_port)
+                if check_power_on(self.serial_port):
+                    logging.info('OK')
+                else:
+                    raise Exception('Device down')
+            else:
+                logging.info('OK')
+            logging.info('initial setiings..')
+            if load_initial_settings(self.serial_port):
+                logging.info('OK')
+            else:
+                raise Exception('Init settings failed')
+            logging.debug('status: sleep')
+            self.status='sleep'
+        except Exception as e:
+            for frame in traceback.extract_tb(sys.exc_info()[2]):
+                fname,lineno,fn,text = frame
+                print("Error in %s on line %d" % (fname, lineno))
+            logging.error('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
+            logging.debug('status: crashed')
+            self.status='crashed'
+    def send_sms(self):
+        try:
+            logging.debug
+            if not send_command(self.serial_port, b'AT+CMGS="' + self.sms.recipient + b'"\r', b'>'):
+                raise Exception('message was not sended')
+            if not send_command(self.serial_port,self.sms.content +bytes([26])):
+                raise Exception('message was not sended')
+            logging.debug('sended sucessful')
+            logging.debug('status: sleep')
+            self.status='sleep'
+        except Exception as e:
+            for frame in traceback.extract_tb(sys.exc_info()[2]):
+                fname,lineno,fn,text = frame
+                print("Error in %s on line %d" % (fname, lineno))
+            logging.error('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
+            logging.debug('status: crashed')
+            self.status='crashed'
+    def read_sms(self):
+        try:
+            logging.debug('sms reader dummy')        
+        except Exception as e:
+            logging.error('Get exception %s'%(self.getName(),e))
+            self.status='crashed'
+class SMS():
+    def __init__(self, *args, **kwargs):
+        if 'recipient' in kwargs and 'content' in kwargs:
+            self.recipient=kwargs.get('recipient')
+            self.content=kwargs.get('content').encode('utf-8')
+        else:
+            self.recipient=args[0][:12]
+            self.content=args[0][12:]
+        logging.debug('message constructed: %s'%self)
+    def __repr__(self):
+        return '%s %s'%(self.recipient.decode('utf-8'),self.content.decode('utf-8'))
+    def __str__(self):
+        return 'recipient: %s\n content: %s'%(self.recipient.decode('utf-8'),self.content.decode('utf-8'))    
+class MyTCPHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        self.data = self.request.recv(1024).strip()
+        logging.debug('bytes recieved: %s'%self.data)
+        sms=SMS(self.data)
+        global sms_queue
+        sms_queue.put(sms)
+def send_command(serial_port, command_b, answer=msg_ok, timeout=timeout):
+    serial_port.flushInput()
+    serial_port.write(command_b)
+    return wait_for(serial_port, answer, timeout)
+def wait_for(serial_port, template, timeout=timeout):
+    template=template
+    answer=(b'')
     timestamp=time.time()
     while time.time()-timestamp<timeout and not template in answer:
-        answer+=ser.read(ser.inWaiting())
+        answer+=serial_port.read(serial_port.inWaiting())
         time.sleep(0.1)
-    print(answer)
+    logging.debug('Recieved from: *** %s ***: %s'%(serial_port.port,answer))
     return template in answer
-def check_power_on():
-    return send_command('AT\r')
-def power_on():
-    ser.write(b'+++')
-def load_initial_settings():
-    if not send_command('ATZ\r'): # Сбросим настройки
+def check_power_on(serial_port):
+    return send_command(serial_port, b'AT\r')
+def power_on(serial_port):
+    serial_port.write(b'+++')
+def load_initial_settings(serial_port):
+    if not send_command(serial_port, b'ATZ\r'):
         return False 
-    if not send_command('AT+CSMP=17,167,0,0\r'): # Включим режим отправки обычных сообщений (17,167,0,16 для flash message)
+    if not send_command(serial_port, b'AT+CSMP=17,167,0,0\r'):
         return False
-    return send_command('AT+CMGF=1\r') # Включим текстовый режим
-def send_sms(recipient, content):
-    if not send_command('AT+CMGS="' + recipient + '"\r', '>'):
-        return False
-    if not send_command(content.encode() + b'\r', '>'):
-        return False
-    return send_command(bytes([26]))
+    return send_command(serial_port, b'AT+CMGF=1\r')
 # STATE MACHINE
 # +STATES
 def idle():
-    print('initialization..')
-    global ser
+    logging.info('initialization..')
     global state
-    print('serial..')
-    if not ser.isOpen():
-        ser=ser.open()
-        if ser.isOpen(): 
-            print('OK')
-        else:
-            print('FAIL')
-            return
-    else:
-        print('OK')
-    print('power..')
-    if not check_power_on():
-        power_on()
-        if check_power_on():
-            print('OK')
-        else:
-            print('FAIL')
-            return
-    else:
-        print('OK')
-    print('initial setiings..')
-    if load_initial_settings():
-        print('OK')
-    else:
-        print('FAIL')
-        return
+    global tcp_serv_thread
+    global devices
+    for serial_info in serial_ports:
+        port=serial_info[0]
+        br=serial_info[1]
+        serial_port=serial.Serial(port, br)
+        dev=Device(serial_port)
+        devices.append(dev)
+        logging.debug('starting init thread')
+        dev.set_status('running')
+        thread=threading.Thread(target=dev.initiate)
+        thread.setDaemon(True)
+        thread.start()
+        logging.debug('work is done')
+    logging.info('TCP server')
+    tcp_serv=socketserver.TCPServer(tcp_serv_addr, MyTCPHandler)
+    tcp_serv.allow_reuse_address=True
+    tcp_serv_thread=threading.Thread(target=tcp_serv.serve_forever)
+    tcp_serv_thread.daemon=True
+    tcp_serv_thread.start()
+    logging.info('OK')
     state='wait'
-def wait():
-    print('Ready to serve!')
-    print('checking email..')
-    if mbox.__len__()==0:
-        print('Maildir empty')
-    else:
-        for key in mbox.keys():
-            message = email.message_from_string(mbox.get_string(key))
-            if message.get_content_type()=='text/plain':
-                recipient = message['subject']
-                content   = message.get_payload()
-                print('sending sms')
-                answer    = send_sms(recipient, content)
-                if answer:
-                    mbox.remove(key)
-                else:
-                    print('message not sent')
-            else: 
-                print('Message contains non plain text')
-    time.sleep(period)
+    while not state=='shutdown':
+        logging.debug('ready to serve')
+        manage_devices()
+        time.sleep(period)
+def shutdown():
+    logging.info('shutting down')
+    exit()
 options={
     'idle':idle,
-    'wait':wait,
+#    'wait':wait,
+    'shutdown':shutdown,
 }
 #-STATES
-while True:
-    print('state: '+ state)
+def main():
+    logging.debug('Current state is: %s'%state)
     options[state]()
+if __name__ == "__main__":
+    main()
+
+
