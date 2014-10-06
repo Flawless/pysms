@@ -12,8 +12,10 @@ import ast
 import traceback
 import binascii
 import struct
+import math
 #sys.path.append('/home/flawless/projects/work/fletcontrol/pySMS/lib/python/')
 import fl_models
+#import peewee
 # SETTINGS
 tcp_serv_addr=('', 25111)
 serial_ports=['/dev/ttyACM1']#, ('/dev/ttyACM1','19200'), ('/dev/ttyACM2','19200')]
@@ -22,6 +24,7 @@ msg_error=b'ERROR'
 period=5
 timeout=120
 # INIT
+STEP = 1.0/2**32
 logging.basicConfig(format = '%(levelname)-8s %(process)s %(thread)s: [%(asctime)s] %(message)s', level = logging.DEBUG, filename = '/var/log/pysms.log')
 state='idle'
 timestamp=time.time()
@@ -29,6 +32,23 @@ send_sms_queue=queue.Queue()
 recieved_sms_queue=queue.Queue()
 tcp_serv_thread=threading.Thread()
 devices=[]
+def parse_alarm_mask(alarm_bytes):
+    alarm_bytes=int(binascii.hexlify(alarm_bytes),16)
+    alarms = {}
+    alarms["lightings"]      = alarm_bytes & 0b01000000 > 0
+    alarms["gsm"]            = alarm_bytes & 0b00100000 > 0
+    alarms["gps"]            = alarm_bytes & 0b00010000 > 0
+    alarms["charge"]         = alarm_bytes & 0b00001000 > 0
+    alarms["tilt"]           = alarm_bytes & 0b00000100 > 0
+    alarms["hit"]            = alarm_bytes & 0b00000010 > 0
+    alarms["position_shift"] = alarm_bytes & 0b00000001 > 0
+    return alarms
+def from_our_format2float(array):
+    i = array[:2]
+    f = array[2:]
+    i = struct.unpack('h', i)[0]
+    f = struct.unpack('I', f)[0]
+    return i + math.copysign(f*STEP,i)
 def write_hex(bstr):  #hexlify
     try:
         binascii.unhexlify(bstr)
@@ -188,7 +208,7 @@ class Device():
                 sms=SMS(recipient=recipient, content=content)
                 recieved_sms_queue.put(sms)
                 command=b'AT+CMGD='+end_of_command
-                send_command(self.serial_port,command)
+                #send_command(self.serial_port,command)
                 logging.info('recieved message %s'%sms)
             #if not send_command(self.serial_port, b'AT+CSCS="IRA"\r'):
             #    raise Exception('Setting device mode to IRA failed')
@@ -235,34 +255,56 @@ class SMS():
     def __str__(self):
         return 'recipient: %s\n content: %s'%(self.recipient,self.content)    
     def to_base(self):
-        data=binascii.unhexlify(self.content)
-        length=data[2]
-        proto=[data[0],data[1],data[2],data[3:7],data[7:11],data[11:3+length-2],data[3+length-2:3+length]]
-        logging.debug(proto)
-        if not proto[0]==35:
-            raise Exception('Proto error')
-        if not proto[1]==1:
-            raise Exception('Proto error')
-        sender=struct.unpack('I',proto[3])[0]
-        reciver=struct.unpack('I',proto[4])[0]
-        body=[proto[5][0],proto[5][1:]]
-        logging.debug(body)
-        mes_id=body[0]
-        mes_content=body[1]
-        if mes_id==1:
-            data=[mes_content[:8],mes_content[8:16],mes_content[16:24],mes_content[24:26],mes_content[26:28],mes_content[28],mes_content[28:30]]
-            logging.debug(data)
-            time=datetime.datetime.fromtimestamp(struct.unpack('q',data[0])[0])
-            lat=struct.unpack('d',data[1])[0]
-            lon=struct.unpack('d',data[2])[0]
-            brightness=struct.unpack('H',data[3])[0]
-            bat_charge=struct.unpack('H',data[4])[0]
-            inclination=data[5]
-            alarm_reg=data[6]
-            logging.debug('sender %s time %s lat %s lon %s brightness %s bat_charge %s inclination %s alarm_reg %s'%(sender,time,lat,lon,brightness,bat_charge,inclination,alarm_reg))
-            logging.debug(fl_models.NsControlBouymessage(blink_mode=1,bouy=sender,time=time,lat=lat,lon=lon,brightness=brightness,charge=bat_charge,inclination=inclination).save()==1)
-        else:
-            logging.debug('message id not 1')
+        try:
+            data=binascii.unhexlify(self.content)
+            length=data[2]
+            proto=[data[0],data[1],data[2],data[3:7],data[7:11],data[11:3+length]]#data[11:3+length-2],data[3+length-2:3+length]]
+            logging.debug(proto)
+            if not proto[0]==35:
+                raise Exception('Proto error')
+            if not proto[1]==1:
+                raise Exception('Proto error')
+            sender=struct.unpack('I',proto[3])[0]
+            reciver=struct.unpack('I',proto[4])[0]
+            body=[proto[5][0],proto[5][1:]]
+            logging.debug(body)
+            mes_id=body[0]
+            mes_content=body[1]
+            if mes_id==1:
+                data=[mes_content[:8],mes_content[8:14],mes_content[14:20],mes_content[20:22],mes_content[22:24],mes_content[24],mes_content[25],mes_content[26:28]]
+                logging.debug(data)
+                time=datetime.datetime.fromtimestamp(struct.unpack('q',data[0])[0])
+                lon=from_our_format2float(data[1])
+                lat=from_our_format2float(data[2])
+                #lon=struct.unpack('d',data[1])[0]
+                #lat=struct.unpack('d',data[2])[0]
+                brightness=struct.unpack('H',data[3])[0]
+                bat_charge=struct.unpack('H',data[4])[0]
+                inclination=data[5]
+                temp=data[6]
+                alarm_reg=data[7]
+                alarms=parse_alarm_mask(alarm_reg)
+                logging.debug(alarms)
+                logging.debug('sender %s time %s lat %s lon %s brightness %s bat_charge %s inclination %s temp %s alarm_reg %s'%(sender,time,lat,lon,brightness,bat_charge,inclination,temp,alarm_reg))
+                new_data=fl_models.NsControlBouymessage(blink_mode=1,bouy=sender,time=time,lat=lat,lon=lon,brightness=brightness,charge=bat_charge,inclination=inclination,gps_problem=alarms['gps'],drift_alarm=alarms['position_shift'],hit_sensor=alarms['hit'])
+                res=new_data.save()
+                logging.debug(res==1)
+                try:
+                    last_message=fl_models.NsControlBouylaststate.get(fl_models.NsControlBouylaststate.bouy==sender)
+                    last_message.message=new_data.id
+                except fl_models.NsControlBouylaststate.DoesNotExist:
+                    logging.warning('no previus messages from bouy %s'%sender)
+                    last_message=fl_models.NsControlBouylaststate(bouy=sender,message=new_data.id)
+                #logging.debug(last_message)
+                res=last_message.save()
+                logging.debug(res==1)
+            else:
+                logging.debug('message id not 1')
+        except Exception as e:
+            for frame in traceback.extract_tb(sys.exc_info()[2]):
+                fname,lineno,fn,text = frame
+                print("Error in %s on line %d" % (fname, lineno))
+            logging.error('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
 class MyTCPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         self.data = self.request.recv(1024).strip()
