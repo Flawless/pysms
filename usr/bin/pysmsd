@@ -12,6 +12,7 @@ import ast
 import traceback
 import binascii
 import struct
+import math
 #sys.path.append('/home/flawless/projects/work/fletcontrol/pySMS/lib/python/')
 import fl_models
 # SETTINGS
@@ -22,6 +23,7 @@ msg_error=b'ERROR'
 period=5
 timeout=120
 # INIT
+STEP = 1.0/2**32
 logging.basicConfig(format = '%(levelname)-8s %(process)s %(thread)s: [%(asctime)s] %(message)s', level = logging.DEBUG, filename = '/var/log/pysms.log')
 state='idle'
 timestamp=time.time()
@@ -29,6 +31,12 @@ send_sms_queue=queue.Queue()
 recieved_sms_queue=queue.Queue()
 tcp_serv_thread=threading.Thread()
 devices=[]
+def from_our_format2float(array):
+    i = array[:2]
+    f = array[2:]
+    i = struct.unpack('h', i)
+    f = struct.unpack('I', f)
+    return i + math.copysign(f*STEP,i)
 def write_hex(bstr):  #hexlify
     try:
         binascii.unhexlify(bstr)
@@ -250,11 +258,13 @@ class SMS():
         mes_id=body[0]
         mes_content=body[1]
         if mes_id==1:
-            data=[mes_content[:8],mes_content[8:16],mes_content[16:24],mes_content[24:26],mes_content[26:28],mes_content[28],mes_content[28:30]]
+            data=[mes_content[:8],mes_content[8:14],mes_content[14:20],mes_content[20:22],mes_content[22:24],mes_content[24],mes_content[24:36]]
             logging.debug(data)
             time=datetime.datetime.fromtimestamp(struct.unpack('q',data[0])[0])
-            lat=struct.unpack('d',data[1])[0]
-            lon=struct.unpack('d',data[2])[0]
+            lon=from_our_format2float(data[1])
+            lat=from_our_format2float(data[2])
+            #lon=struct.unpack('d',data[1])[0]
+            #lat=struct.unpack('d',data[2])[0]
             brightness=struct.unpack('H',data[3])[0]
             bat_charge=struct.unpack('H',data[4])[0]
             inclination=data[5]
