@@ -208,7 +208,7 @@ class Device():
                 sms=SMS(recipient=recipient, content=content)
                 recieved_sms_queue.put(sms)
                 command=b'AT+CMGD='+end_of_command
-                #send_command(self.serial_port,command)
+                send_command(self.serial_port,command)
                 logging.info('recieved message %s'%sms)
             #if not send_command(self.serial_port, b'AT+CSCS="IRA"\r'):
             #    raise Exception('Setting device mode to IRA failed')
