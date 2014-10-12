@@ -18,7 +18,7 @@ import fl_models
 #import peewee
 # SETTINGS
 tcp_serv_addr=('', 25111)
-serial_ports=['/dev/ttyACM0']#, '/dev/ttyACM1', '/dev/ttyACM2']#, ('/dev/ttyACM1','19200'), ('/dev/ttyACM2','19200')]
+serial_ports=['/dev/ttyACM1']#, '/dev/ttyACM1', '/dev/ttyACM2']#, ('/dev/ttyACM1','19200'), ('/dev/ttyACM2','19200')]
 msg_ok=b'OK'
 msg_error=b'ERROR'
 period=5
@@ -67,17 +67,16 @@ def manage_devices():
         sms=recieved_sms_queue.get()
         try:
             thread=threading.Thread(target=sms.to_base)
-            logging.debug('writing %s to base, good luck...'%sms)
+            logging.info('writing %s to base, good luck...'%sms)
             thread.start()
         except Exception as e:
             for frame in traceback.extract_tb(sys.exc_info()[2]):
                 fname,lineno,fn,text = frame
-                print("Error in %s on line %d" % (fname, lineno))
-            logging.error('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
+                logging.debug("Error in %s on line %d" % (fname, lineno))
+            logging.debug('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
             recieved_sms_queue.put(sms)
     for dev in devices:
         if dev.status=='crashed' or dev.status=='running' and time.time()-dev.timestamp>300:
-            logging.debug('%s from %s'%(dev.status,time.time()-dev.timestamp))
             logging.info('Trying to re-initiate device %s'%dev)
             if not dev.sms==None:
                 send_sms_queue.put(dev.sms)
@@ -87,10 +86,9 @@ def manage_devices():
             dev.set_status('running')
         elif dev.status=='sleep':
             if not send_sms_queue.empty():
-                logging.debug('sending sms')
                 sms=send_sms_queue.get(block=False)
                 dev.set_sms(sms)
-                logging.debug('sending sms: %s'%sms)
+                logging.info('sending sms: %s'%sms)
                 thread=threading.Thread(target=dev.send_sms)
                 thread.start()
                 dev.set_status('running')
@@ -126,27 +124,21 @@ class Device():
     def set_sms(self, sms):
         self.sms=sms
     def set_status(self, status):
-        logging.debug('device: %s status: %s'%(self,status))
+        if status=='crashed':
+            logging.warning('device: %s status: %s'%(self,status))
+        else:
+            logging.debug('device: %s status: %s'%(self,status))
         self.timestamp=time.time()
         self.status=status
     def initiate(self):
         try:
-            logging.info('serial..')
+            logging.debug('serial ..')
             self.serial_port.close()
             self.serial_port.open()
-            logging.info('OK')
-            # logging.info('power..')
-            # if not check_power_on(self.serial_port):
-            #     power_on(self.serial_port)
-            #     if check_power_on(self.serial_port):
-            #         logging.info('OK')
-            #     else:
-            #         raise Exception('Device down')
-            # else:
-            #     logging.info('OK')
-            logging.info('initial setiings..')
+            logging.info('serial .. OK')
+            logging.debug('initial settings..')
             if load_initial_settings(self.serial_port):
-                logging.info('OK')
+                logging.info('initial settings .. OK')
             else:
                 raise Exception('Init settings failed')
             self.get_sm_size()
@@ -154,49 +146,33 @@ class Device():
         except Exception as e:
             for frame in traceback.extract_tb(sys.exc_info()[2]):
                 fname,lineno,fn,text = frame
-                print("Error in %s on line %d" % (fname, lineno))
+                logging.error("Error in %s on line %d" % (fname, lineno))
             logging.error('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
             self.set_status('crashed')
     def send_sms(self):
         try:
-            logging.debug
+            logging.info('sending %s'%self)
             if not send_command(self.serial_port, b'AT+CMGS="' + self.sms.recipient + b'"\r', b'>'):
                 raise Exception('message was not sended')
             if not send_command(self.serial_port,self.sms.content +bytes([26])):
                 raise Exception('message was not sended')
-            logging.debug('sended sucessful')
+            logging.info('sended %s sucessful'%self)
             self.set_sms(None)
             self.set_status('sleep')
         except Exception as e:
             for frame in traceback.extract_tb(sys.exc_info()[2]):
                 fname,lineno,fn,text = frame
                 print("Error in %s on line %d" % (fname, lineno))
-            logging.error('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
+            logging.debug('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
             self.set_status('crashed')
-    # def check_sms(self):
-    #     try:
-    #         answer=send_command(self.serial_port,b'AT+CMGD=?', None)
-            
-    #         logging.debug('recieved %d messages')
-    #         logging.debug('status: sleep')
-    #         self.check_timestamp=time.time()
-    #         self.status='sleep'
-    #     except Exception as e:
-    #         for frame in traceback.extract_tb(sys.exc_info()[2]):
-    #             fname,lineno,fn,text = frame
-    #             print("Error in %s on line %d" % (fname, lineno))
-    #         logging.error('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
-    #         logging.debug('status: crashed')
-    #         self.status='crashed'
-
     def read_sms(self):
         try:
             sm=self.check_sm()
             if not len(sm)==0:
                 global recieved_sms_queue
-                #if not send_command(self.serial_port, b'AT+CSCS="IRA"\r'):
-                #    raise Exception('Setting device mode to IRA failed')
-            logging.debug('recieved %d new messages'%len(sm))
+                logging.info('recieved %d new messages'%len(sm))
+            else:
+                logging.debug('no new messages recieved')
             for i in sm:
                 end_of_command=i+b'\r'
                 command=b'AT+CMGR='+end_of_command
@@ -210,14 +186,12 @@ class Device():
                 command=b'AT+CMGD='+end_of_command
                 send_command(self.serial_port,command)
                 logging.info('recieved message %s'%sms)
-            #if not send_command(self.serial_port, b'AT+CSCS="IRA"\r'):
-            #    raise Exception('Setting device mode to IRA failed')
             self.set_status('sleep')
             self.check_timestamp=time.time()
         except Exception as e:
             for frame in traceback.extract_tb(sys.exc_info()[2]):
                 fname,lineno,fn,text = frame
-                print("Error in %s on line %d" % (fname, lineno))
+                logging.error("Error in %s on line %d" % (fname, lineno))
             logging.error('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
             self.set_status('crashed')
     def get_sm_size(self):
@@ -235,7 +209,6 @@ class Device():
         sm=answer.split(b',')
         if sm[0]==b'':
             sm=[]
-        logging.debug('SM %s, len(sm) %d'%(sm,len(sm)))
         return sm
 class SMS():
     def __init__(self, *args, **kwargs):
@@ -248,8 +221,7 @@ class SMS():
             self.content=write_hex(args[0][15:])
         else:
             logging.debug('can not construct message from %s'%args[0])
-        #self.to_bytes()
-        logging.debug('message constructed: %s'%self)
+        logging.info('message constructed: %s'%self)
     def __repr__(self):
         return '%s %s'%(self.recipient,self.content)
     def __str__(self):
@@ -284,9 +256,9 @@ class SMS():
                 temp=data[6]
                 alarm_reg=data[7]
                 alarms=parse_alarm_mask(alarm_reg)
-                logging.debug(alarms)
-                logging.debug('sender %s time %s lat %s lon %s brightness %s bat_charge %s inclination %s temp %s alarm_reg %s'%(sender,time,lat,lon,brightness,bat_charge,inclination,temp,alarm_reg))
-                new_data=fl_models.NsControlBouymessage(blink_mode=1,bouy=sender,time=time,lat=lat,lon=lon,brightness=brightness,charge=bat_charge,inclination=inclination,gps_problem=alarms['gps'],drift_alarm=alarms['position_shift'],hit_sensor=alarms['hit'])
+                logging.info(alarms)
+                logging.info('sender %s time %s lat %s lon %s brightness %s bat_charge %s inclination %s temp %s alarm_reg %s'%(sender,time,lat,lon,brightness,bat_charge,inclination,temp,alarm_reg))
+                new_data=fl_models.NsControlBouymessage(blink_mode=1,bouy=sender,time=time,lat=lat,lon=lon,brightness=brightness,charge=bat_charge,inclination=inclination,gps_problem=alarms['gps'],drift_alarm=alarms['position_shift'],hit_sensor=alarms['hit'],lighting_alarm=alarms['lightings'])
                 res=new_data.save()
                 logging.debug(res==1)
                 try:
@@ -308,6 +280,7 @@ class SMS():
 class MyTCPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         self.data = self.request.recv(1024).strip()
+        logging.info('incoming tcp connection recieved')
         logging.debug('bytes recieved: %s'%self.data)
         sms=SMS(self.data)
         global send_sms_queue
@@ -357,7 +330,7 @@ def idle():
     threading.Thread(target=fl_models.database.connect).start()
     for port in serial_ports:
         try:
-            serial_port=serial.Serial(port,115200*2)
+            serial_port=serial.Serial(port)
             dev=Device(serial_port)
             devices.append(dev)
             logging.debug('starting init thread')
@@ -365,19 +338,18 @@ def idle():
             thread=threading.Thread(target=dev.initiate)
             thread.setDaemon(True)
             thread.start()
-            logging.debug('device initialized')
-        finally:
-            logging.info('can not initialize device %s'%dev)
-    logging.info('TCP server')
+            logging.info('device %s initialized'%dev)
+        except:
+            logging.warning('can not initialize device %s'%serial_port)
+    logging.debug('TCP server')
     tcp_serv=socketserver.TCPServer(tcp_serv_addr, MyTCPHandler)
     tcp_serv.allow_reuse_address=True
     tcp_serv_thread=threading.Thread(target=tcp_serv.serve_forever)
     tcp_serv_thread.daemon=True
     tcp_serv_thread.start()
-    logging.info('OK')
+    logging.info('TCP server initialized')
     state='wait'
     while not state=='shutdown':
-        logging.debug('ready to serve')
         manage_devices()
         time.sleep(period)
 def shutdown():
