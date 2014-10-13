@@ -259,7 +259,12 @@ class SMS():
                 logging.info(alarms)
                 logging.info('sender %s time %s lat %s lon %s brightness %s bat_charge %s inclination %s temp %s alarm_reg %s'%(sender,time,lat,lon,brightness,bat_charge,inclination,temp,alarm_reg))
                 new_data=fl_models.NsControlBouymessage(blink_mode=1,bouy=sender,time=time,lat=lat,lon=lon,brightness=brightness,charge=bat_charge,inclination=inclination,gps_problem=alarms['gps'],drift_alarm=alarms['position_shift'],hit_sensor=alarms['hit'],lighting_alarm=alarms['lightings'])
-                res=new_data.save()
+                try:
+                    res=new_data.save()
+                except peewee.OperationalError:
+                    logging.warning('Connection to base broken..reconnecting')
+                    fl_models.database.close()
+                    fl_models.database.connect()
                 logging.debug(res==1)
                 try:
                     last_message=fl_models.NsControlBouylaststate.get(fl_models.NsControlBouylaststate.bouy==sender)
