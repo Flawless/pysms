@@ -15,7 +15,7 @@ import struct
 import math
 #sys.path.append('/home/flawless/projects/work/fletcontrol/pySMS/lib/python/')
 import fl_models
-#import peewee
+import peewee
 # SETTINGS
 tcp_serv_addr=('', 25111)
 serial_ports=['/dev/ttyACM1']#, '/dev/ttyACM1', '/dev/ttyACM2']#, ('/dev/ttyACM1','19200'), ('/dev/ttyACM2','19200')]
@@ -275,6 +275,14 @@ class SMS():
                 #logging.debug(last_message)
                 res=last_message.save()
                 logging.debug(res==1)
+            elif mes_id==4:
+                data=[mes_content[:6],mes_content[6:12]]
+                lon=from_our_format2float(data[0])
+                lat=from_our_format2float(data[1])
+                logging.info('sender %s base_lat %s base_lon %s'%(sender,lat,lon))
+                new_data=fl_models.NsControlBouy.get(id==sender)
+                new_data.base_lat=lat
+                new_data.base_lon=lon
             else:
                 logging.debug('message id not 1')
         except Exception as e:
