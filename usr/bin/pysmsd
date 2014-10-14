@@ -18,7 +18,7 @@ import fl_models
 import peewee
 # SETTINGS
 tcp_serv_addr=('', 25111)
-serial_ports=['/dev/ttyACM1']#, '/dev/ttyACM1', '/dev/ttyACM2']#, ('/dev/ttyACM1','19200'), ('/dev/ttyACM2','19200')]
+serial_ports=['/dev/ttyACM0']#, '/dev/ttyACM1', '/dev/ttyACM2']#, ('/dev/ttyACM1','19200'), ('/dev/ttyACM2','19200')]
 msg_ok=b'OK'
 msg_error=b'ERROR'
 period=5
@@ -92,7 +92,7 @@ def manage_devices():
                 thread=threading.Thread(target=dev.send_sms)
                 thread.start()
                 dev.set_status('running')
-            elif time.time()-dev.check_timestamp>60:
+            elif time.time()-dev.check_timestamp>30:
                 logging.debug('reading sms')
                 thread=threading.Thread(target=dev.read_sms)
                 thread.start()
@@ -243,6 +243,7 @@ class SMS():
             mes_id=body[0]
             mes_content=body[1]
             if mes_id==1:
+                logging.debug('Recieved #1 mesage')
                 data=[mes_content[:8],mes_content[8:14],mes_content[14:20],mes_content[20:22],mes_content[22:24],mes_content[24],mes_content[25],mes_content[26:28]]
                 logging.debug(data)
                 time=datetime.datetime.fromtimestamp(struct.unpack('q',data[0])[0])
@@ -276,13 +277,22 @@ class SMS():
                 res=last_message.save()
                 logging.debug(res==1)
             elif mes_id==4:
+                logging.debug('Recieved #4 mesage')
                 data=[mes_content[:6],mes_content[6:12]]
                 lon=from_our_format2float(data[0])
                 lat=from_our_format2float(data[1])
                 logging.info('sender %s base_lat %s base_lon %s'%(sender,lat,lon))
-                new_data=fl_models.NsControlBouy.get(id==sender)
+                new_data=fl_models.NsControlBouy.get(fl_models.NsControlBouy.id==sender)
                 new_data.base_lat=lat
                 new_data.base_lon=lon
+                logging.debug(new_data.base_lat)
+                try:
+                    res=new_data.save()
+                    logging.debug(res==1)
+                except peewee.OperationalError:
+                    logging.warning('Connection to base broken..reconnecting')
+                    fl_models.database.close()
+                    fl_models.database.connect()
             else:
                 logging.debug('message id not 1')
         except Exception as e:
