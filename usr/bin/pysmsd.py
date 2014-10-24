@@ -16,9 +16,13 @@ import math
 #sys.path.append('/home/flawless/projects/work/fletcontrol/pySMS/lib/python/')
 import fl_models
 import peewee
+import random
+import re
+from pytz import reference
+import pdu
 # SETTINGS
 tcp_serv_addr=('', 25111)
-serial_ports=['/dev/ttyACM0']#, '/dev/ttyACM1', '/dev/ttyACM2']#, ('/dev/ttyACM1','19200'), ('/dev/ttyACM2','19200')]
+serial_ports=['/dev/ttyUSB0', '/dev/ttyUSB3']#, '/dev/ttyACM1', '/dev/ttyACM2']#, ('/dev/ttyACM1','19200'), ('/dev/ttyACM2','19200')]
 msg_ok=b'OK'
 msg_error=b'ERROR'
 period=5
@@ -66,9 +70,8 @@ def manage_devices():
     while not recieved_sms_queue.empty():
         sms=recieved_sms_queue.get()
         try:
-            thread=threading.Thread(target=sms.to_base)
             logging.info('writing %s to base, good luck...'%sms)
-            thread.start()
+            sms.to_base()
         except Exception as e:
             for frame in traceback.extract_tb(sys.exc_info()[2]):
                 fname,lineno,fn,text = frame
@@ -149,16 +152,23 @@ class Device():
                 logging.error("Error in %s on line %d" % (fname, lineno))
             logging.error('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
             self.set_status('crashed')
-    def send_sms(self):
+    def send_sms(self,pdu=True):
         try:
             logging.info('sending %s'%self)
-            if not send_command(self.serial_port, b'AT+CMGS="' + self.sms.recipient + b'"\r', b'>'):
-                raise Exception('message was not sended')
-            if not send_command(self.serial_port,self.sms.content +bytes([26])):
-                raise Exception('message was not sended')
-            logging.info('sended %s sucessful'%self)
-            self.set_sms(None)
-            self.set_status('sleep')
+            if pdu:
+                data,length=pdu.sms_to_pdu(self.recipient.decode(),self.content.decode())
+                if not send_command(self.serial_port, b'AT+CMGS'+length+b'\r'):
+                    raise Exception('message was not sended')
+                if not send_command(self.serial_port,data +bytes([26])):
+                    raise Exception('message was not sended')
+            else:
+                if not send_command(self.serial_port, b'AT+CMGS="' + self.sms.recipient + b'"\r', b'>'):
+                    raise Exception('message was not sended')
+                if not send_command(self.serial_port,self.sms.content +bytes([26])):
+                    raise Exception('message was not sended')
+                logging.info('sended %s sucessful'%self)
+                self.set_sms(None)
+                self.set_status('sleep')
         except Exception as e:
             for frame in traceback.extract_tb(sys.exc_info()[2]):
                 fname,lineno,fn,text = frame
@@ -177,14 +187,15 @@ class Device():
                 end_of_command=i+b'\r'
                 command=b'AT+CMGR='+end_of_command
                 answer=send_command(self.serial_port,command,None)
-                data=answer.split(b',')
-                recipient=data[1].replace(b'"',b'')
-                content=data[4].split(b'\r\n')[1]
-                content=binascii.unhexlify(content)
-                sms=SMS(recipient=recipient, content=content)
-                recieved_sms_queue.put(sms)
+                content=answer.split(b'\r\n')[2]
+                content,recipient=pdu.pdu_to_sms(content.decode())
                 command=b'AT+CMGD='+end_of_command
                 send_command(self.serial_port,command)
+                if content == None and recipient == None:
+                    continue
+                #content=binascii.unhexlify(content)
+                sms=SMS(recipient=recipient, content=content, id=i)
+                recieved_sms_queue.put(sms)
                 logging.info('recieved message %s'%sms)
             self.set_status('sleep')
             self.check_timestamp=time.time()
@@ -214,11 +225,15 @@ class SMS():
     def __init__(self, *args, **kwargs):
         self.byte_message=[]
         if 'recipient' in kwargs and 'content' in kwargs:
-            self.recipient=write_hex(kwargs.get('recipient'))
-            self.content=write_hex(kwargs.get('content'))
+            self.recipient=kwargs.get('recipient')
+            self.content=kwargs.get('content')
+            if 'id' in kwargs:
+                self.id=kwargs.get('id')
+            else:
+                self.id=None
         elif args[0][:3]==b'sms':
-            self.recipient=write_hex(args[0][3:15])
-            self.content=write_hex(args[0][15:])
+            self.recipient=args[0][3:15]
+            self.content=args[0][15:]
         else:
             logging.debug('can not construct message from %s'%args[0])
         logging.info('message constructed: %s'%self)
@@ -227,6 +242,7 @@ class SMS():
     def __str__(self):
         return 'recipient: %s\n content: %s'%(self.recipient,self.content)    
     def to_base(self):
+        logging.debug(self.content)
         try:
             data=binascii.unhexlify(self.content)
             length=data[2]
@@ -236,8 +252,9 @@ class SMS():
                 raise Exception('Proto error')
             if not proto[1]==1:
                 raise Exception('Proto error')
-            sender=struct.unpack('I',proto[3])[0]
-            reciver=struct.unpack('I',proto[4])[0]
+            #sender=struct.unpack('I',proto[3])[0]
+            sender=fl_models.NsControlBouy.get(fl_models.NsControlBouy.sim_number==binascii.unhexlify(self.recipient).decode()).id
+            #reciver=struct.unpack('I',proto[4])[0]
             body=[proto[5][0],proto[5][1:]]
             logging.debug(body)
             mes_id=body[0]
@@ -274,7 +291,11 @@ class SMS():
                     logging.warning('no previus messages from bouy %s'%sender)
                     last_message=fl_models.NsControlBouylaststate(bouy=sender,message=new_data.id)
                 #logging.debug(last_message)
-                res=last_message.save()
+                try:
+                    res=last_message.save()
+                except peewee.IntegrityError:
+                    logging.warning("Integrity error peewee")
+                    time.sleep(3)
                 logging.debug(res==1)
             elif mes_id==4:
                 logging.debug('Recieved #4 mesage')
@@ -300,6 +321,44 @@ class SMS():
                 fname,lineno,fn,text = frame
                 print("Error in %s on line %d" % (fname, lineno))
             logging.error('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
+
+    # def make_pdu(self):
+    #     # http://hardisoft.ru/soft/otpravka-sms-soobshhenij-v-formate-pdu-teoriya-s-primerami-na-c-chast-1/
+    #     PDU_type=b'\x11'
+    #     TP_MR=b'\x00'
+    #     TP_DA=bytes([len(self.recipient)-1])+b'\x91'+self.get_pdu_recipient()
+    #     TP_PID=b'\x00'
+    #     TP_DCS=b'\x00'
+    #     TP_VP=b'\xaa'
+    #     # TP_SCTS=self.get_pdu_timestamp()
+    #     TP_UD=binascii.unhexlify(b'E8329BFD4697D9EC37')#self.content
+    #     TP_UDL=b'\x0a'#bytes([len(TP_UD)])
+    #     TPDU=PDU_type + TP_MR + TP_DA + TP_PID + TP_DCS + TP_VP + TP_UDL + TP_UD
+    #     SCA=b'\x00'
+    #     SMS=SCA+TPDU
+    #     return binascii.hexlify(SMS)
+    # def get_pdu_timestamp(self):
+    #     date=datetime.datetime.today()
+    #     year=  bytes([date.year%100])
+    #     month= bytes([date.month])
+    #     day=   bytes([date.day])
+    #     hour=  bytes([date.hour])
+    #     minute=bytes([date.minute])
+    #     second=bytes([date.second])
+    #     tz=    bytes([reference.LocalTimezone().utcoffset(datetime.datetime.today()).seconds//3600])
+    #     pdu_date=year+month+day+hour+minute+second+tz
+    #     pdu_date=self.shuffle(binascii.hexlify(pdu_date).decode()).encode()
+    #     return binascii.unhexlify(pdu_date)
+    # def shuffle(self,string):
+    #     if len(string)%2 == 1:
+    #         raise Exception('string length must be even')
+    #     return string
+    # def get_pdu_recipient(self):
+    #     recipient=re.sub("\D", "", self.recipient.decode())
+    #     if len(recipient)%2 == 1:
+    #         recipient=recipient+'f'
+    #     recipient=self.shuffle(recipient).encode()
+    #     return binascii.unhexlify(recipient)
 class MyTCPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         self.data = self.request.recv(1024).strip()
@@ -337,11 +396,13 @@ def power_on(serial_port):
 def load_initial_settings(serial_port):
     if not send_command(serial_port, b'ATZ\r'):
         return False 
-    if not send_command(serial_port, b'AT+CSMP=17,167,0,4\r'):
-        return False
-    if not send_command(serial_port, b'AT+CSCS="HEX"\r'):
-        return False
-    return send_command(serial_port, b'AT+CMGF=1\r')
+    if not send_command(serial_port, b'ATE0\r'):
+        return False 
+    # if not send_command(serial_port, b'AT+CSMP=17,167,0,4\r'):
+    #     return False
+    # if not send_command(serial_port, b'AT+CSCS="HEX"\r'):
+    #     return False
+    return send_command(serial_port, b'AT+CMGF=0\r')
 
 # STATE MACHINE
 # +STATES
