@@ -24,8 +24,8 @@ from serial_func import *
 from sms import SMS
 from device import Device
 # SETTINGS
-tcp_serv_addr=('', 25111)
-serial_ports=['/dev/ttyUSB0', '/dev/ttyUSB3']#, '/dev/ttyACM1', '/dev/ttyACM2']#, ('/dev/ttyACM1','19200'), ('/dev/ttyACM2','19200')]
+tcp_serv_addr=('', 25112)
+serial_ports=['/dev/ttyUSB0', '/dev/ttyUSB4']#, '/dev/ttyACM1', '/dev/ttyACM2']#, ('/dev/ttyACM1','19200'), ('/dev/ttyACM2','19200')]
 msg_ok=b'OK'
 msg_error=b'ERROR'
 period=5
