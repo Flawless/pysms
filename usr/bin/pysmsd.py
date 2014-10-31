@@ -21,8 +21,8 @@ import re
 from pytz import reference
 import pdu
 # SETTINGS
-tcp_serv_addr=('', 25111)
-serial_ports=['/dev/ttyUSB0', '/dev/ttyUSB3']#, '/dev/ttyACM1', '/dev/ttyACM2']#, ('/dev/ttyACM1','19200'), ('/dev/ttyACM2','19200')]
+tcp_serv_addr=('', 25112)
+serial_ports=['/dev/ttyUSB0', '/dev/ttyUSB4']#, '/dev/ttyACM1', '/dev/ttyACM2']#, ('/dev/ttyACM1','19200'), ('/dev/ttyACM2','19200')]
 msg_ok=b'OK'
 msg_error=b'ERROR'
 period=5
@@ -152,13 +152,14 @@ class Device():
                 logging.error("Error in %s on line %d" % (fname, lineno))
             logging.error('%s %s'%(sys.exc_info()[0], sys.exc_info()[1]))
             self.set_status('crashed')
-    def send_sms(self,pdu=True):
+    def send_sms(self,pdu_format=True):
         try:
             logging.info('sending %s'%self)
-            if pdu:
-                data,length=pdu.sms_to_pdu(self.recipient.decode(),self.content.decode())
-                if not send_command(self.serial_port, b'AT+CMGS'+length+b'\r'):
+            if pdu_format:
+                data,length=pdu.sms_to_pdu(self.sms.recipient.decode(),binascii.hexlify(self.sms.content).decode())
+                if not send_command(self.serial_port, b'AT+CMGS='+length+b'\r', answer=b'>'):
                     raise Exception('message was not sended')
+                logging.debug(data)
                 if not send_command(self.serial_port,data +bytes([26])):
                     raise Exception('message was not sended')
             else:
@@ -253,7 +254,7 @@ class SMS():
             if not proto[1]==1:
                 raise Exception('Proto error')
             #sender=struct.unpack('I',proto[3])[0]
-            sender=fl_models.NsControlBouy.get(fl_models.NsControlBouy.sim_number==binascii.unhexlify(self.recipient).decode()).id
+            sender=fl_models.NsControlBouy.get(fl_models.NsControlBouy.sim_number==self.recipient.decode()).id
             #reciver=struct.unpack('I',proto[4])[0]
             body=[proto[5][0],proto[5][1:]]
             logging.debug(body)
@@ -396,8 +397,8 @@ def power_on(serial_port):
 def load_initial_settings(serial_port):
     if not send_command(serial_port, b'ATZ\r'):
         return False 
-    if not send_command(serial_port, b'ATE0\r'):
-        return False 
+#    if not send_command(serial_port, b'ATE0\r'):
+#        return False 
     # if not send_command(serial_port, b'AT+CSMP=17,167,0,4\r'):
     #     return False
     # if not send_command(serial_port, b'AT+CSCS="HEX"\r'):
